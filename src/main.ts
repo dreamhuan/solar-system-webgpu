@@ -1,7 +1,8 @@
-import { mat4 } from "gl-matrix";
+import { mat4, vec3 } from "gl-matrix";
+import GUI from "lil-gui";
+import { OrbitCamera } from "./camera";
 import shaderCode from "./shader.wgsl?raw";
 import orbitShaderCode from "./orbit.wgsl?raw";
-import { OrbitCamera } from "./camera";
 
 // --- 0. 配置数据 ---
 interface PlanetData {
@@ -9,8 +10,9 @@ interface PlanetData {
   radius: number; // 相对半径
   distance: number; // 相对距离
   speed: number; // 公转速度
-  color: [number, number, number]; // 混合颜色 (通常为白色 [1,1,1])
+  color: [number, number, number];
   texIndex: number; // 纹理数组中的层级索引
+  initialAngle: number; // 初始角度 (CPU/GPU同步用)
 }
 
 const SOLAR_SYSTEM: PlanetData[] = [
@@ -21,83 +23,91 @@ const SOLAR_SYSTEM: PlanetData[] = [
     speed: 0,
     color: [1, 1, 0.8],
     texIndex: 0,
+    initialAngle: 0,
   },
   {
     name: "Mercury",
     radius: 0.38,
-    distance: 5.0,
+    distance: 6.0,
     speed: 4.1,
     color: [1, 1, 1],
     texIndex: 1,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Venus",
     radius: 0.95,
-    distance: 8.0,
+    distance: 10.0,
     speed: 1.6,
     color: [1, 1, 1],
     texIndex: 2,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Earth",
     radius: 1.0,
-    distance: 12.0,
+    distance: 15.0,
     speed: 1.0,
     color: [1, 1, 1],
     texIndex: 3,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Mars",
     radius: 0.53,
-    distance: 16.0,
+    distance: 20.0,
     speed: 0.53,
     color: [1, 1, 1],
     texIndex: 4,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Jupiter",
     radius: 2.2,
-    distance: 22.0,
+    distance: 28.0,
     speed: 0.3,
     color: [1, 1, 1],
     texIndex: 5,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Saturn",
     radius: 2.0,
-    distance: 28.0,
+    distance: 36.0,
     speed: 0.2,
     color: [1, 1, 1],
     texIndex: 6,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Uranus",
     radius: 1.5,
-    distance: 34.0,
+    distance: 44.0,
     speed: 0.1,
     color: [1, 1, 1],
     texIndex: 7,
+    initialAngle: Math.random() * 6,
   },
   {
     name: "Neptune",
     radius: 1.4,
-    distance: 40.0,
+    distance: 52.0,
     speed: 0.1,
     color: [1, 1, 1],
     texIndex: 8,
+    initialAngle: Math.random() * 6,
   },
 ];
 
-// 虚拟图片路径 (你可以稍后替换为真实的 .jpg URL)
 const TEXTURE_URLS = SOLAR_SYSTEM.map((p) => `${p.name}.jpg`);
 
 // --- 1. 辅助函数 ---
 
-// 生成带 UV 的球体
+// 生成球体 (UV 修正版)
 function createSphere(
   radius: number,
-  widthSegments: number = 32,
-  heightSegments: number = 16
+  widthSegments: number = 64,
+  heightSegments: number = 32
 ) {
   const vertices: number[] = [];
   const indices: number[] = [];
@@ -114,16 +124,19 @@ function createSphere(
       const cosLon = Math.cos(longitude);
       const sinLon = Math.sin(longitude);
 
-      // 1. Position (x, y, z)
+      // Position
       vertices.push(
         radius * cosLon * cosLat,
         radius * sinLat,
         radius * sinLon * cosLat
       );
-      // 2. Normal (nx, ny, nz)
+      // Normal
       vertices.push(cosLon * cosLat, sinLat, sinLon * cosLat);
-      // 3. UV (u, v) - WebGPU 纹理坐标原点在左上角，可能需要翻转 V，这里先保持标准
-      vertices.push(1 - u, v);
+
+      // UV 修正:
+      // u: 使用 1-u 以修正纹理的左右镜像问题
+      // v: 使用 1-v 修正 WebGPU/Vulkan 坐标系的上下翻转
+      vertices.push(1 - u, 1 - v); // <--- 修改了这里
     }
   }
 
@@ -134,8 +147,10 @@ function createSphere(
       const i1 = i0 + 1;
       const i2 = (y + 1) * stride + x;
       const i3 = i2 + 1;
-      indices.push(i0, i1, i2);
-      indices.push(i2, i1, i3);
+      // indices.push(i0, i1, i2);
+      // indices.push(i2, i1, i3);
+      indices.push(i0, i2, i1);
+      indices.push(i2, i3, i1);
     }
   }
 
@@ -146,37 +161,17 @@ function createSphere(
   };
 }
 
-// 生成单位圆的虚线数据 (LineList)
-function createDashedCircle(segments: number = 128, gapRatio: number = 0.5) {
-  const vertices: number[] = [];
-  const step = (Math.PI * 2) / segments;
-
-  for (let i = 0; i < segments; i++) {
-    const angle1 = i * step;
-    const angle2 = angle1 + step * gapRatio; // 只画一部分，形成虚线
-
-    // 线段起点
-    vertices.push(Math.cos(angle1), 0, Math.sin(angle1));
-    // 线段终点
-    vertices.push(Math.cos(angle2), 0, Math.sin(angle2));
-  }
-
-  return new Float32Array(vertices);
-}
-
-// 加载图片或生成占位图
+// 加载纹理 (2K 分辨率)
 async function loadTextureBitmap(url: string): Promise<ImageBitmap> {
   const width = 2048;
   const height = 1024;
 
   try {
-    // 尝试加载真实图片
     const response = await fetch(url);
     if (!response.ok) throw new Error("Network error");
     const blob = await response.blob();
     const img = await createImageBitmap(blob);
 
-    // 调整大小
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
@@ -184,40 +179,35 @@ async function loadTextureBitmap(url: string): Promise<ImageBitmap> {
     ctx.drawImage(img, 0, 0, width, height);
     return createImageBitmap(canvas);
   } catch (e) {
-    // 失败（或无图片）时，生成带文字的纹理
+    // 失败时的占位图
     const canvas = document.createElement("canvas");
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d")!;
-
-    // 生成随机底色
-    const hue = Math.random() * 360;
-    ctx.fillStyle = `hsl(${hue}, 50%, 50%)`;
+    ctx.fillStyle = "#222";
     ctx.fillRect(0, 0, width, height);
-
-    // 画网格线
-    ctx.strokeStyle = "rgba(255,255,255,0.2)";
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    for (let i = 0; i <= width; i += 128) {
-      ctx.moveTo(i, 0);
-      ctx.lineTo(i, height);
-    }
-    for (let i = 0; i <= height; i += 128) {
-      ctx.moveTo(0, i);
-      ctx.lineTo(width, i);
-    }
-    ctx.stroke();
-
-    // 写名字
     ctx.fillStyle = "white";
-    ctx.font = "bold 80px Arial";
+    ctx.font = "bold 100px Arial";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(url.replace(".jpg", ""), width / 2, height / 2);
-
     return createImageBitmap(canvas);
   }
+}
+
+// 生成虚线圆环 (用于轨道)
+function createDashedCircle(segments: number = 256, gapRatio: number = 0.5) {
+  const vertices: number[] = [];
+  const step = (Math.PI * 2) / segments;
+
+  for (let i = 0; i < segments; i++) {
+    const angle1 = i * step;
+    const angle2 = angle1 + step * gapRatio;
+    vertices.push(Math.cos(angle1), 0, Math.sin(angle1));
+    vertices.push(Math.cos(angle2), 0, Math.sin(angle2));
+  }
+
+  return new Float32Array(vertices);
 }
 
 // --- 2. 主程序 ---
@@ -237,18 +227,35 @@ async function init() {
 
   context.configure({ device, format, alphaMode: "premultiplied" });
 
-  // === 新增：初始化相机 ===
-  // 传入 canvas 和初始距离 (例如 60)
-  const camera = new OrbitCamera(canvas, 60);
+  // 初始化相机
+  const camera = new OrbitCamera(canvas, 80);
 
-  // --- 资源创建 ---
+  // 初始化 GUI
+  const state = {
+    pauseOrbit: false,
+    pauseRotation: false,
+    focusTarget: "Sun",
+    timeScale: 1.0,
+  };
+  const gui = new GUI({ title: "Solar Control" });
+  gui.add(state, "pauseOrbit").name("Pause Orbit");
+  gui.add(state, "pauseRotation").name("Pause Rotate");
+  gui.add(state, "timeScale", 0, 5).name("Time Speed");
+  gui
+    .add(
+      state,
+      "focusTarget",
+      SOLAR_SYSTEM.map((p) => p.name)
+    )
+    .name("Focus On")
+    .onChange((name: string) => {
+      if (name === "Sun") camera.reset();
+    });
 
-  // 1. 加载所有纹理
+  // --- 资源加载 ---
   const bitmaps = await Promise.all(
     TEXTURE_URLS.map((url) => loadTextureBitmap(url))
   );
-
-  // 2. 创建纹理数组
   const texture = device.createTexture({
     size: [2048, 1024, TEXTURE_URLS.length],
     format: "rgba8unorm",
@@ -257,8 +264,6 @@ async function init() {
       GPUTextureUsage.COPY_DST |
       GPUTextureUsage.RENDER_ATTACHMENT,
   });
-
-  // 3. 将图片上传到纹理数组的层中
   bitmaps.forEach((bitmap, i) => {
     device.queue.copyExternalImageToTexture(
       { source: bitmap },
@@ -266,8 +271,6 @@ async function init() {
       [2048, 1024]
     );
   });
-
-  // 4. 创建采样器
   const sampler = device.createSampler({
     magFilter: "linear",
     minFilter: "linear",
@@ -275,7 +278,7 @@ async function init() {
     addressModeV: "clamp-to-edge",
   });
 
-  // 5. 网格 Buffer
+  // 球体 Buffer
   const sphere = createSphere(1.0);
   const vertexBuffer = device.createBuffer({
     size: sphere.vertexData.byteLength,
@@ -284,7 +287,6 @@ async function init() {
   });
   new Float32Array(vertexBuffer.getMappedRange()).set(sphere.vertexData);
   vertexBuffer.unmap();
-
   const indexBuffer = device.createBuffer({
     size: sphere.indexData.byteLength,
     usage: GPUBufferUsage.INDEX,
@@ -293,21 +295,19 @@ async function init() {
   new Uint16Array(indexBuffer.getMappedRange()).set(sphere.indexData);
   indexBuffer.unmap();
 
-  // 6. 实例 Buffer
-  // 结构: rad(1) + dist(1) + speed(1) + texIndex(1) + color(3) + angle(1) = 8 floats
+  // 实例 Buffer
   const instanceData = new Float32Array(SOLAR_SYSTEM.length * 8);
   SOLAR_SYSTEM.forEach((planet, i) => {
     const base = i * 8;
     instanceData[base + 0] = planet.radius;
     instanceData[base + 1] = planet.distance;
     instanceData[base + 2] = planet.speed;
-    instanceData[base + 3] = planet.texIndex; // 纹理层索引
+    instanceData[base + 3] = planet.texIndex;
     instanceData[base + 4] = planet.color[0];
     instanceData[base + 5] = planet.color[1];
     instanceData[base + 6] = planet.color[2];
-    instanceData[base + 7] = Math.random() * Math.PI * 2;
+    instanceData[base + 7] = planet.initialAngle;
   });
-
   const instanceBuffer = device.createBuffer({
     size: instanceData.byteLength,
     usage: GPUBufferUsage.VERTEX,
@@ -316,79 +316,8 @@ async function init() {
   new Float32Array(instanceBuffer.getMappedRange()).set(instanceData);
   instanceBuffer.unmap();
 
-  // 7. Uniform Buffer
-  const uniformBufferSize = 80; // mat4(64) + time(4) + padding
-  const uniformBuffer = device.createBuffer({
-    size: uniformBufferSize,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-
-  // --- 管线配置 ---
-  const module = device.createShaderModule({ code: shaderCode });
-  const pipeline = device.createRenderPipeline({
-    layout: "auto",
-    vertex: {
-      module,
-      entryPoint: "vs_main",
-      buffers: [
-        // Buffer 0: Mesh (Stride = 32 bytes)
-        {
-          arrayStride: 8 * 4,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x3" }, // pos
-            { shaderLocation: 1, offset: 12, format: "float32x3" }, // norm
-            { shaderLocation: 2, offset: 24, format: "float32x2" }, // uv <--- 新增
-          ],
-        },
-        // Buffer 1: Instance (Stride = 32 bytes)
-        {
-          arrayStride: 8 * 4,
-          stepMode: "instance",
-          attributes: [
-            { shaderLocation: 3, offset: 0, format: "float32" }, // radius
-            { shaderLocation: 4, offset: 4, format: "float32" }, // distance
-            { shaderLocation: 5, offset: 8, format: "float32" }, // speed
-            { shaderLocation: 6, offset: 12, format: "float32" }, // texIndex <--- 新增
-            { shaderLocation: 7, offset: 16, format: "float32x3" }, // color
-            { shaderLocation: 8, offset: 28, format: "float32" }, // angle
-          ],
-        },
-      ],
-    },
-    fragment: {
-      module,
-      entryPoint: "fs_main",
-      targets: [{ format }],
-    },
-    primitive: { topology: "triangle-list", cullMode: "back" },
-    depthStencil: {
-      depthWriteEnabled: true,
-      depthCompare: "less",
-      format: "depth24plus",
-    },
-  });
-
-  // 创建 BindGroup
-  // 必须与 Shader 中的 @binding 对应
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [
-      { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: sampler },
-      { binding: 2, resource: texture.createView() }, // 默认视图即可访问所有层
-    ],
-  });
-
-  const depthTexture = device.createTexture({
-    size: [canvas.width, canvas.height],
-    format: "depth24plus",
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
-
-  // === 新增：轨道线资源 ===
-
-  // 1. 创建轨道几何数据 (单位圆)
-  const orbitData = createDashedCircle(256, 0.6); // 256段，0.6是实线比例
+  // 轨道 Buffer
+  const orbitData = createDashedCircle(256, 0.6);
   const orbitVertexBuffer = device.createBuffer({
     size: orbitData.byteLength,
     usage: GPUBufferUsage.VERTEX,
@@ -397,7 +326,65 @@ async function init() {
   new Float32Array(orbitVertexBuffer.getMappedRange()).set(orbitData);
   orbitVertexBuffer.unmap();
 
-  // 2. 创建轨道渲染管线
+  // Uniform Buffer (mat4 + orbitTime + rotationTime + padding)
+  const uniformBuffer = device.createBuffer({
+    size: 80,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // --- Pipelines ---
+
+  // 1. 行星 Pipeline
+  const module = device.createShaderModule({ code: shaderCode });
+  const pipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module,
+      entryPoint: "vs_main",
+      buffers: [
+        // Mesh: pos(3)+norm(3)+uv(2)
+        {
+          arrayStride: 32,
+          attributes: [
+            { shaderLocation: 0, offset: 0, format: "float32x3" },
+            { shaderLocation: 1, offset: 12, format: "float32x3" },
+            { shaderLocation: 2, offset: 24, format: "float32x2" },
+          ],
+        },
+        // Instance: radius(1)+dist(1)+speed(1)+tex(1)+color(3)+angle(1)
+        {
+          arrayStride: 32,
+          stepMode: "instance",
+          attributes: [
+            { shaderLocation: 3, offset: 0, format: "float32" },
+            { shaderLocation: 4, offset: 4, format: "float32" },
+            { shaderLocation: 5, offset: 8, format: "float32" },
+            { shaderLocation: 6, offset: 12, format: "float32" },
+            { shaderLocation: 7, offset: 16, format: "float32x3" },
+            { shaderLocation: 8, offset: 28, format: "float32" },
+          ],
+        },
+      ],
+    },
+    fragment: { module, entryPoint: "fs_main", targets: [{ format }] },
+    primitive: { topology: "triangle-list", cullMode: "back" },
+    depthStencil: {
+      depthWriteEnabled: true,
+      depthCompare: "less",
+      format: "depth24plus",
+    },
+  });
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: texture.createView() },
+    ],
+  });
+
+  // 2. 轨道 Pipeline
   const orbitModule = device.createShaderModule({ code: orbitShaderCode });
   const orbitPipeline = device.createRenderPipeline({
     layout: "auto",
@@ -405,22 +392,15 @@ async function init() {
       module: orbitModule,
       entryPoint: "vs_main",
       buffers: [
-        // Buffer 0: 轨道几何 (Position only)
         {
-          arrayStride: 3 * 4, // xyz
+          arrayStride: 12,
           attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }],
-        },
-        // Buffer 1: 复用 Instance Buffer (只读取 distance)
+        }, // pos only
         {
-          arrayStride: 8 * 4, // 依然是 32 字节步长 (必须和原 buffer 一致)
+          arrayStride: 32,
           stepMode: "instance",
-          attributes: [
-            // 我们只需要 distance。在原结构中:
-            // radius(0), distance(4), speed(8)...
-            // 所以 offset 是 4
-            { shaderLocation: 1, offset: 4, format: "float32" },
-          ],
-        },
+          attributes: [{ shaderLocation: 1, offset: 4, format: "float32" }],
+        }, // read distance only
       ],
     },
     fragment: {
@@ -429,7 +409,6 @@ async function init() {
       targets: [
         {
           format,
-          // 开启混合模式，让线条看起来半透明且平滑
           blend: {
             color: {
               srcFactor: "src-alpha",
@@ -445,44 +424,71 @@ async function init() {
         },
       ],
     },
-    primitive: {
-      topology: "line-list", // <--- 关键：画线模式
-    },
+    primitive: { topology: "line-list" },
     depthStencil: {
-      depthWriteEnabled: false, // 轨道线不写入深度，避免遮挡
+      depthWriteEnabled: false,
       depthCompare: "less",
       format: "depth24plus",
     },
   });
-
   const orbitBindGroup = device.createBindGroup({
     layout: orbitPipeline.getBindGroupLayout(0),
     entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
   });
 
+  const depthTexture = device.createTexture({
+    size: [canvas.width, canvas.height],
+    format: "depth24plus",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
   // --- 渲染循环 ---
   const projectionMatrix = mat4.create();
-  // const viewMatrix = mat4.create();
   const mvpMatrix = mat4.create();
-  let time = 0;
+
+  let orbitTime = 0;
+  let rotationTime = 0;
 
   function frame() {
-    time += 0.01;
+    const dt = 0.01 * state.timeScale;
+    if (!state.pauseOrbit) orbitTime += dt;
+    if (!state.pauseRotation) rotationTime += dt;
+
+    // CPU 计算聚焦目标的位置
+    if (state.focusTarget !== "Sun") {
+      const targetPlanet = SOLAR_SYSTEM.find(
+        (p) => p.name === state.focusTarget
+      );
+      if (targetPlanet) {
+        const angle =
+          -1.0 *
+          (targetPlanet.initialAngle + orbitTime * targetPlanet.speed * 0.1);
+        const x = Math.cos(angle) * targetPlanet.distance;
+        const z = Math.sin(angle) * targetPlanet.distance;
+        vec3.set(camera.target, x, 0, z);
+        camera.updateMatrix();
+      }
+    }
 
     const aspect = canvas.width / canvas.height;
-
-    // 更新投影矩阵(防止窗口缩放变形);
-    mat4.perspective(projectionMatrix, (2 * Math.PI) / 5, aspect, 0.1, 1000.0);
-
-    // === 修改：使用相机矩阵 ===
-    // 原来的: mat4.lookAt(viewMatrix, [0, 40, 60], [0, 0, 0], [0, 1, 0]);
-    // 现在的: 直接使用 camera.viewMatrix
+    mat4.perspectiveZO(
+      projectionMatrix,
+      (2 * Math.PI) / 5,
+      aspect,
+      0.1,
+      1000.0
+    ); // <--- 修改了这里
 
     mat4.multiply(mvpMatrix, projectionMatrix, camera.viewMatrix);
 
-    // 写入 Uniform (使用 as any 规避 gl-matrix 类型问题)
+    // Uniform 更新
     device.queue.writeBuffer(uniformBuffer, 0, mvpMatrix as any);
-    device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([time]));
+    device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([orbitTime]));
+    device.queue.writeBuffer(
+      uniformBuffer,
+      68,
+      new Float32Array([rotationTime])
+    );
 
     const commandEncoder = device.createCommandEncoder();
     const passEncoder = commandEncoder.beginRenderPass({
@@ -490,6 +496,7 @@ async function init() {
         {
           view: context.getCurrentTexture().createView(),
           loadOp: "clear",
+          // 透明背景，以便显示 CSS 星空
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
           storeOp: "store",
         },
@@ -502,6 +509,7 @@ async function init() {
       },
     });
 
+    // 绘制行星
     passEncoder.setPipeline(pipeline);
     passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, vertexBuffer);

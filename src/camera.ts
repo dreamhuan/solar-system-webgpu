@@ -117,7 +117,7 @@ export class OrbitCamera {
 
       if (this.isDragging) {
         // --- 旋转逻辑 ---
-        this.theta -= deltaX * this.sensitivity;
+        this.theta += deltaX * this.sensitivity;
         this.phi -= deltaY * this.sensitivity;
 
         // 限制垂直角度，防止翻转 (Gimbal Lock 预防)

@@ -1,6 +1,7 @@
 struct Uniforms {
   viewProjectionMatrix: mat4x4<f32>,
-  globalTime: f32,
+  orbitTime: f32,
+  rotationTime: f32,
 }
 
 @group(0) @binding(0)
@@ -24,24 +25,32 @@ struct VertexOutput {
 fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) i_radius: f32, @location(4) i_distance: f32, @location(5) i_speed: f32, @location(6) i_texIndex: f32, @location(7) i_color: vec3<f32>, @location(8) i_initialAngle: f32) -> VertexOutput {
   var output: VertexOutput;
 
-  // 1. 轨道计算
-  let angle = i_initialAngle + uniforms.globalTime * i_speed * 0.1;
+  // 1. 公转 (逆时针)
+  let angle = - 1.0 * (i_initialAngle + uniforms.orbitTime * i_speed * 0.1);
   var orbitPos = vec3<f32>(0.0);
   if (i_distance > 0.001) {
     orbitPos = vec3<f32>(cos(angle) * i_distance, 0.0, sin(angle) * i_distance);
   }
 
-  // 2. 自转计算
+  // 2. 自转 (逆时针)
   let rotSpeed = 0.5;
-  let rAngle = uniforms.globalTime * rotSpeed + i_initialAngle;
+  // 只有星球才自转，背景球(半径为负)和太阳不自转或独立处理
+  var rAngle = 0.0;
+  // 简单判断：如果半径是正的，且不是太阳(距离>0)，则自转
+  // 或者让所有正半径物体自转
+  if (i_radius > 0.0) {
+    rAngle = - 1.0 * (uniforms.rotationTime * rotSpeed + i_initialAngle);
+  }
+
   let c = cos(rAngle);
   let s = sin(rAngle);
 
-  let rotatedPos = vec3<f32>(position.x * c + position.z * s, position.y, position.z * c - position.x * s);
+  // 3. 旋转几何体 (标准 Y 轴旋转)
+  let rotatedPos = vec3<f32>(position.x * c - position.z * s, position.y, position.x * s + position.z * c);
 
-  let rotatedNormal = vec3<f32>(normal.x * c + normal.z * s, normal.y, normal.z * c - normal.x * s);
+  let rotatedNormal = vec3<f32>(normal.x * c - normal.z * s, normal.y, normal.x * s + normal.z * c);
 
-  // 3. 计算世界坐标
+  // 4. 构建世界坐标
   let worldPos = (rotatedPos * i_radius) + orbitPos;
 
   output.Position = uniforms.viewProjectionMatrix * vec4<f32>(worldPos, 1.0);
@@ -57,32 +66,33 @@ fn vs_main(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @lo
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-  // --- 关键修改开始 ---
+  // 1. 归一化法线
+  let N = normalize(input.Normal);
 
-  // 1. 计算点光源方向：从 太阳中心(0,0,0) 指向 当前像素位置
-  // 光照方向 = normalize(光源位置 - 物体位置)
-  // 因为光源在 0,0,0，所以是 normalize(-input.WorldPos)
-  var lightDir = normalize(- input.WorldPos);
+  // 2. 光照方向 (从太阳指向表面位置的反方向)
+  let L = normalize(vec3<f32>(0.0, 0.0, 0.0) - input.WorldPos);
 
-  // 2. 基础环境光 (Ambient Light)
-  // 调高这个值，背光面就会变亮，不再是纯黑
-  var ambient = 0.3;
+  // 3. 漫反射 (向阳面亮度)
+  var diffuse = max(dot(N, L), 0.0);
 
-  // 3. 漫反射计算
-  var diffuse = max(dot(input.Normal, lightDir), 0.0);
+  // 4. 环境光 (Shadow Color) 
+  // rgb亮度通道，b大一点，这样背光面会有淡淡的蓝灰色细节
+  var ambient = vec3<f32>(0.30, 0.30, 0.35);
 
-  // 特殊处理：如果是太阳 (TexIndex == 0)，它自己就是光源，不需要光照计算
-  if (input.TexIndex < 0.1) {
+  // 5. 太阳和背景自发光 (保持不变)
+  // 这里的逻辑是：如果是太阳(Index 0)或背景，忽略光照，始终最亮
+  if (input.TexIndex < 0.1 || input.TexIndex > 8.5) {
     diffuse = 1.0;
-    ambient = 0.5;
-    // 让太阳更亮一点
+    // 太阳不需要环境光叠加，否则会过曝
+    ambient = vec3<f32>(0.0);
   }
 
-  // 4. 获取纹理颜色
+  // 6. 采样
   let texColor = textureSample(myTexture, mySampler, input.Uv, i32(input.TexIndex));
 
-  // 5. 组合最终颜色 = 纹理 * (环境光 + 漫反射)
-  let finalColor = texColor.rgb * (diffuse + ambient) * input.Color;
+  // 7. 混合
+  let lighting = vec3<f32>(diffuse) + ambient;
+  let finalColor = texColor.rgb * lighting * input.Color;
 
   return vec4<f32>(finalColor, 1.0);
 }
