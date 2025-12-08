@@ -1,27 +1,97 @@
 import { mat4 } from "gl-matrix";
 import shaderCode from "./shader.wgsl?raw";
 
-// --- 0. 行星数据定义 ---
+// --- 0. 配置数据 ---
 interface PlanetData {
+  name: string;
   radius: number; // 相对半径
   distance: number; // 相对距离
   speed: number; // 公转速度
-  color: [number, number, number];
+  color: [number, number, number]; // 混合颜色 (通常为白色 [1,1,1])
+  texIndex: number; // 纹理数组中的层级索引
 }
 
 const SOLAR_SYSTEM: PlanetData[] = [
-  { radius: 3.0, distance: 0, speed: 0, color: [1.0, 0.8, 0.2] }, // Sun (为了演示，半径缩小了，否则太大)
-  { radius: 0.38, distance: 4.0, speed: 4.1, color: [0.7, 0.7, 0.7] }, // Mercury
-  { radius: 0.95, distance: 7.2, speed: 1.6, color: [0.9, 0.8, 0.2] }, // Venus
-  { radius: 1.0, distance: 10.0, speed: 1.0, color: [0.0, 0.5, 1.0] }, // Earth
-  { radius: 0.53, distance: 15.2, speed: 0.53, color: [1.0, 0.2, 0.0] }, // Mars
-  { radius: 2.0, distance: 25.0, speed: 0.3, color: [0.8, 0.7, 0.6] }, // Jupiter (为了演示，距离拉近了)
-  { radius: 1.8, distance: 35.0, speed: 0.2, color: [0.9, 0.8, 0.5] }, // Saturn
-  { radius: 1.2, distance: 45.0, speed: 0.1, color: [0.5, 0.8, 0.9] }, // Uranus
-  { radius: 1.2, distance: 55.0, speed: 0.1, color: [0.2, 0.3, 0.8] }, // Neptune
+  {
+    name: "Sun",
+    radius: 3.0,
+    distance: 0,
+    speed: 0,
+    color: [1, 1, 0.8],
+    texIndex: 0,
+  },
+  {
+    name: "Mercury",
+    radius: 0.38,
+    distance: 5.0,
+    speed: 4.1,
+    color: [1, 1, 1],
+    texIndex: 1,
+  },
+  {
+    name: "Venus",
+    radius: 0.95,
+    distance: 8.0,
+    speed: 1.6,
+    color: [1, 1, 1],
+    texIndex: 2,
+  },
+  {
+    name: "Earth",
+    radius: 1.0,
+    distance: 12.0,
+    speed: 1.0,
+    color: [1, 1, 1],
+    texIndex: 3,
+  },
+  {
+    name: "Mars",
+    radius: 0.53,
+    distance: 16.0,
+    speed: 0.53,
+    color: [1, 1, 1],
+    texIndex: 4,
+  },
+  {
+    name: "Jupiter",
+    radius: 2.2,
+    distance: 22.0,
+    speed: 0.3,
+    color: [1, 1, 1],
+    texIndex: 5,
+  },
+  {
+    name: "Saturn",
+    radius: 2.0,
+    distance: 28.0,
+    speed: 0.2,
+    color: [1, 1, 1],
+    texIndex: 6,
+  },
+  {
+    name: "Uranus",
+    radius: 1.5,
+    distance: 34.0,
+    speed: 0.1,
+    color: [1, 1, 1],
+    texIndex: 7,
+  },
+  {
+    name: "Neptune",
+    radius: 1.4,
+    distance: 40.0,
+    speed: 0.1,
+    color: [1, 1, 1],
+    texIndex: 8,
+  },
 ];
 
-// --- 1. 几何体生成辅助函数 ---
+// 虚拟图片路径 (你可以稍后替换为真实的 .jpg URL)
+const TEXTURE_URLS = SOLAR_SYSTEM.map((p) => `${p.name}.jpg`);
+
+// --- 1. 辅助函数 ---
+
+// 生成带 UV 的球体
 function createSphere(
   radius: number,
   widthSegments: number = 32,
@@ -42,15 +112,16 @@ function createSphere(
       const cosLon = Math.cos(longitude);
       const sinLon = Math.sin(longitude);
 
-      const px = radius * cosLon * cosLat;
-      const py = radius * sinLat;
-      const pz = radius * sinLon * cosLat;
-
-      // Position (x, y, z)
-      vertices.push(px, py, pz);
-      // Normal (nx, ny, nz) - 对于球体，法线就是归一化的位置
-      // 因为 radius 为 1 时，position 就是 normal
+      // 1. Position (x, y, z)
+      vertices.push(
+        radius * cosLon * cosLat,
+        radius * sinLat,
+        radius * sinLon * cosLat
+      );
+      // 2. Normal (nx, ny, nz)
       vertices.push(cosLon * cosLat, sinLat, sinLon * cosLat);
+      // 3. UV (u, v) - WebGPU 纹理坐标原点在左上角，可能需要翻转 V，这里先保持标准
+      vertices.push(1 - u, v);
     }
   }
 
@@ -73,6 +144,62 @@ function createSphere(
   };
 }
 
+// 加载图片或生成占位图
+async function loadTextureBitmap(url: string): Promise<ImageBitmap> {
+  const width = 2048;
+  const height = 1024;
+
+  try {
+    // 尝试加载真实图片
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("Network error");
+    const blob = await response.blob();
+    const img = await createImageBitmap(blob);
+
+    // 调整大小
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, width, height);
+    return createImageBitmap(canvas);
+  } catch (e) {
+    // 失败（或无图片）时，生成带文字的纹理
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d")!;
+
+    // 生成随机底色
+    const hue = Math.random() * 360;
+    ctx.fillStyle = `hsl(${hue}, 50%, 50%)`;
+    ctx.fillRect(0, 0, width, height);
+
+    // 画网格线
+    ctx.strokeStyle = "rgba(255,255,255,0.2)";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    for (let i = 0; i <= width; i += 128) {
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, height);
+    }
+    for (let i = 0; i <= height; i += 128) {
+      ctx.moveTo(0, i);
+      ctx.lineTo(width, i);
+    }
+    ctx.stroke();
+
+    // 写名字
+    ctx.fillStyle = "white";
+    ctx.font = "bold 80px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(url.replace(".jpg", ""), width / 2, height / 2);
+
+    return createImageBitmap(canvas);
+  }
+}
+
 // --- 2. 主程序 ---
 async function init() {
   const canvas = document.querySelector<HTMLCanvasElement>("#app")!;
@@ -90,8 +217,41 @@ async function init() {
 
   context.configure({ device, format, alphaMode: "premultiplied" });
 
-  // 3. 创建资源
-  // 3.1 网格 (Mesh) Buffer
+  // --- 资源创建 ---
+
+  // 1. 加载所有纹理
+  const bitmaps = await Promise.all(
+    TEXTURE_URLS.map((url) => loadTextureBitmap(url))
+  );
+
+  // 2. 创建纹理数组
+  const texture = device.createTexture({
+    size: [2048, 1024, TEXTURE_URLS.length],
+    format: "rgba8unorm",
+    usage:
+      GPUTextureUsage.TEXTURE_BINDING |
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  // 3. 将图片上传到纹理数组的层中
+  bitmaps.forEach((bitmap, i) => {
+    device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture: texture, origin: [0, 0, i] },
+      [2048, 1024]
+    );
+  });
+
+  // 4. 创建采样器
+  const sampler = device.createSampler({
+    magFilter: "linear",
+    minFilter: "linear",
+    addressModeU: "repeat",
+    addressModeV: "clamp-to-edge",
+  });
+
+  // 5. 网格 Buffer
   const sphere = createSphere(1.0);
   const vertexBuffer = device.createBuffer({
     size: sphere.vertexData.byteLength,
@@ -109,19 +269,19 @@ async function init() {
   new Uint16Array(indexBuffer.getMappedRange()).set(sphere.indexData);
   indexBuffer.unmap();
 
-  // 3.2 实例 (Instance) Buffer
-  // 每个实例数据结构: radius(1) + distance(1) + speed(1) + color(3) + angle(1) + padding(1) = 8 floats = 32 bytes
+  // 6. 实例 Buffer
+  // 结构: rad(1) + dist(1) + speed(1) + texIndex(1) + color(3) + angle(1) = 8 floats
   const instanceData = new Float32Array(SOLAR_SYSTEM.length * 8);
   SOLAR_SYSTEM.forEach((planet, i) => {
     const base = i * 8;
     instanceData[base + 0] = planet.radius;
     instanceData[base + 1] = planet.distance;
     instanceData[base + 2] = planet.speed;
-    instanceData[base + 3] = planet.color[0];
-    instanceData[base + 4] = planet.color[1];
-    instanceData[base + 5] = planet.color[2];
-    instanceData[base + 6] = Math.random() * Math.PI * 2; // 随机初始角度
-    instanceData[base + 7] = 0; // Padding
+    instanceData[base + 3] = planet.texIndex; // 纹理层索引
+    instanceData[base + 4] = planet.color[0];
+    instanceData[base + 5] = planet.color[1];
+    instanceData[base + 6] = planet.color[2];
+    instanceData[base + 7] = Math.random() * Math.PI * 2;
   });
 
   const instanceBuffer = device.createBuffer({
@@ -132,47 +292,48 @@ async function init() {
   new Float32Array(instanceBuffer.getMappedRange()).set(instanceData);
   instanceBuffer.unmap();
 
-  // 3.3 Uniform Buffer
-  // mat4 (64 bytes) + time (4 bytes) + padding (12 bytes) = 80 bytes -> 必须对齐到 16 bytes 的倍数
-  const uniformBufferSize = 80;
+  // 7. Uniform Buffer
+  const uniformBufferSize = 80; // mat4(64) + time(4) + padding
   const uniformBuffer = device.createBuffer({
     size: uniformBufferSize,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  // 4. 管线配置
+  // --- 管线配置 ---
   const module = device.createShaderModule({ code: shaderCode });
   const pipeline = device.createRenderPipeline({
     layout: "auto",
     vertex: {
       module,
-      entryPoint: "vs_main", // 对应 shader.wgsl 中的函数名
+      entryPoint: "vs_main",
       buffers: [
-        // Buffer 0: Mesh (Position + Normal)
+        // Buffer 0: Mesh (Stride = 32 bytes)
         {
-          arrayStride: 6 * 4, // 24 bytes
+          arrayStride: 8 * 4,
           attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x3" }, // position
-            { shaderLocation: 1, offset: 12, format: "float32x3" }, // normal
+            { shaderLocation: 0, offset: 0, format: "float32x3" }, // pos
+            { shaderLocation: 1, offset: 12, format: "float32x3" }, // norm
+            { shaderLocation: 2, offset: 24, format: "float32x2" }, // uv <--- 新增
           ],
         },
-        // Buffer 1: Instance Data
+        // Buffer 1: Instance (Stride = 32 bytes)
         {
-          arrayStride: 8 * 4, // 32 bytes
-          stepMode: "instance", // 关键：每个实例读取一次
+          arrayStride: 8 * 4,
+          stepMode: "instance",
           attributes: [
-            { shaderLocation: 2, offset: 0, format: "float32" }, // radius
-            { shaderLocation: 3, offset: 4, format: "float32" }, // distance
-            { shaderLocation: 4, offset: 8, format: "float32" }, // speed
-            { shaderLocation: 5, offset: 12, format: "float32x3" }, // color
-            { shaderLocation: 6, offset: 24, format: "float32" }, // angle
+            { shaderLocation: 3, offset: 0, format: "float32" }, // radius
+            { shaderLocation: 4, offset: 4, format: "float32" }, // distance
+            { shaderLocation: 5, offset: 8, format: "float32" }, // speed
+            { shaderLocation: 6, offset: 12, format: "float32" }, // texIndex <--- 新增
+            { shaderLocation: 7, offset: 16, format: "float32x3" }, // color
+            { shaderLocation: 8, offset: 28, format: "float32" }, // angle
           ],
         },
       ],
     },
     fragment: {
       module,
-      entryPoint: "fs_main", // 对应 shader.wgsl 中的函数名
+      entryPoint: "fs_main",
       targets: [{ format }],
     },
     primitive: { topology: "triangle-list", cullMode: "back" },
@@ -183,34 +344,39 @@ async function init() {
     },
   });
 
+  // 创建 BindGroup
+  // 必须与 Shader 中的 @binding 对应
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: sampler },
+      { binding: 2, resource: texture.createView() }, // 默认视图即可访问所有层
+    ],
   });
 
-  // 深度纹理
   const depthTexture = device.createTexture({
     size: [canvas.width, canvas.height],
     format: "depth24plus",
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
 
-  // 5. 渲染循环
+  // --- 渲染循环 ---
   const projectionMatrix = mat4.create();
   const viewMatrix = mat4.create();
   const mvpMatrix = mat4.create();
   let time = 0;
 
   function frame() {
-    time += 0.02;
+    time += 0.01;
 
     const aspect = canvas.width / canvas.height;
-    // 调整相机位置，确保能看到整个系统
     mat4.perspective(projectionMatrix, (2 * Math.PI) / 5, aspect, 0.1, 1000.0);
-    mat4.lookAt(viewMatrix, [0, 60, 80], [0, 0, 0], [0, 1, 0]);
+    // 稍微抬高相机，俯视太阳系
+    mat4.lookAt(viewMatrix, [0, 40, 60], [0, 0, 0], [0, 1, 0]);
     mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
 
-    // 更新 Uniform
+    // 写入 Uniform (使用 as any 规避 gl-matrix 类型问题)
     device.queue.writeBuffer(uniformBuffer, 0, mvpMatrix as any);
     device.queue.writeBuffer(uniformBuffer, 64, new Float32Array([time]));
 
@@ -220,7 +386,7 @@ async function init() {
         {
           view: context.getCurrentTexture().createView(),
           loadOp: "clear",
-          clearValue: { r: 0, g: 0, b: 0.05, a: 1 }, // 深空黑背景
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
           storeOp: "store",
         },
       ],
@@ -235,13 +401,11 @@ async function init() {
     passEncoder.setPipeline(pipeline);
     passEncoder.setBindGroup(0, bindGroup);
     passEncoder.setVertexBuffer(0, vertexBuffer);
-    passEncoder.setVertexBuffer(1, instanceBuffer); // 绑定实例数据
+    passEncoder.setVertexBuffer(1, instanceBuffer);
     passEncoder.setIndexBuffer(indexBuffer, "uint16");
-
-    // drawIndexed(indexCount, instanceCount)
     passEncoder.drawIndexed(sphere.indexCount, SOLAR_SYSTEM.length);
-
     passEncoder.end();
+
     device.queue.submit([commandEncoder.finish()]);
     requestAnimationFrame(frame);
   }

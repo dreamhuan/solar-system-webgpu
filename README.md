@@ -12,3 +12,9 @@ xxx
 npm i
 npm run dev
 ```
+
+## 其他
+
+哈勃望远镜图库：https://esahubble.org/images/
+
+星球贴图： https://www.solarsystemscope.com/textures/
