@@ -1,5 +1,7 @@
 import { mat4 } from "gl-matrix";
 import shaderCode from "./shader.wgsl?raw";
+import orbitShaderCode from "./orbit.wgsl?raw";
+import { OrbitCamera } from "./camera";
 
 // --- 0. 配置数据 ---
 interface PlanetData {
@@ -144,6 +146,24 @@ function createSphere(
   };
 }
 
+// 生成单位圆的虚线数据 (LineList)
+function createDashedCircle(segments: number = 128, gapRatio: number = 0.5) {
+  const vertices: number[] = [];
+  const step = (Math.PI * 2) / segments;
+
+  for (let i = 0; i < segments; i++) {
+    const angle1 = i * step;
+    const angle2 = angle1 + step * gapRatio; // 只画一部分，形成虚线
+
+    // 线段起点
+    vertices.push(Math.cos(angle1), 0, Math.sin(angle1));
+    // 线段终点
+    vertices.push(Math.cos(angle2), 0, Math.sin(angle2));
+  }
+
+  return new Float32Array(vertices);
+}
+
 // 加载图片或生成占位图
 async function loadTextureBitmap(url: string): Promise<ImageBitmap> {
   const width = 2048;
@@ -216,6 +236,10 @@ async function init() {
   const format = navigator.gpu.getPreferredCanvasFormat();
 
   context.configure({ device, format, alphaMode: "premultiplied" });
+
+  // === 新增：初始化相机 ===
+  // 传入 canvas 和初始距离 (例如 60)
+  const camera = new OrbitCamera(canvas, 60);
 
   // --- 资源创建 ---
 
@@ -361,9 +385,84 @@ async function init() {
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
 
+  // === 新增：轨道线资源 ===
+
+  // 1. 创建轨道几何数据 (单位圆)
+  const orbitData = createDashedCircle(256, 0.6); // 256段，0.6是实线比例
+  const orbitVertexBuffer = device.createBuffer({
+    size: orbitData.byteLength,
+    usage: GPUBufferUsage.VERTEX,
+    mappedAtCreation: true,
+  });
+  new Float32Array(orbitVertexBuffer.getMappedRange()).set(orbitData);
+  orbitVertexBuffer.unmap();
+
+  // 2. 创建轨道渲染管线
+  const orbitModule = device.createShaderModule({ code: orbitShaderCode });
+  const orbitPipeline = device.createRenderPipeline({
+    layout: "auto",
+    vertex: {
+      module: orbitModule,
+      entryPoint: "vs_main",
+      buffers: [
+        // Buffer 0: 轨道几何 (Position only)
+        {
+          arrayStride: 3 * 4, // xyz
+          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }],
+        },
+        // Buffer 1: 复用 Instance Buffer (只读取 distance)
+        {
+          arrayStride: 8 * 4, // 依然是 32 字节步长 (必须和原 buffer 一致)
+          stepMode: "instance",
+          attributes: [
+            // 我们只需要 distance。在原结构中:
+            // radius(0), distance(4), speed(8)...
+            // 所以 offset 是 4
+            { shaderLocation: 1, offset: 4, format: "float32" },
+          ],
+        },
+      ],
+    },
+    fragment: {
+      module: orbitModule,
+      entryPoint: "fs_main",
+      targets: [
+        {
+          format,
+          // 开启混合模式，让线条看起来半透明且平滑
+          blend: {
+            color: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "src-alpha",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        },
+      ],
+    },
+    primitive: {
+      topology: "line-list", // <--- 关键：画线模式
+    },
+    depthStencil: {
+      depthWriteEnabled: false, // 轨道线不写入深度，避免遮挡
+      depthCompare: "less",
+      format: "depth24plus",
+    },
+  });
+
+  const orbitBindGroup = device.createBindGroup({
+    layout: orbitPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+  });
+
   // --- 渲染循环 ---
   const projectionMatrix = mat4.create();
-  const viewMatrix = mat4.create();
+  // const viewMatrix = mat4.create();
   const mvpMatrix = mat4.create();
   let time = 0;
 
@@ -371,10 +470,15 @@ async function init() {
     time += 0.01;
 
     const aspect = canvas.width / canvas.height;
+
+    // 更新投影矩阵(防止窗口缩放变形);
     mat4.perspective(projectionMatrix, (2 * Math.PI) / 5, aspect, 0.1, 1000.0);
-    // 稍微抬高相机，俯视太阳系
-    mat4.lookAt(viewMatrix, [0, 40, 60], [0, 0, 0], [0, 1, 0]);
-    mat4.multiply(mvpMatrix, projectionMatrix, viewMatrix);
+
+    // === 修改：使用相机矩阵 ===
+    // 原来的: mat4.lookAt(viewMatrix, [0, 40, 60], [0, 0, 0], [0, 1, 0]);
+    // 现在的: 直接使用 camera.viewMatrix
+
+    mat4.multiply(mvpMatrix, projectionMatrix, camera.viewMatrix);
 
     // 写入 Uniform (使用 as any 规避 gl-matrix 类型问题)
     device.queue.writeBuffer(uniformBuffer, 0, mvpMatrix as any);
@@ -404,6 +508,25 @@ async function init() {
     passEncoder.setVertexBuffer(1, instanceBuffer);
     passEncoder.setIndexBuffer(indexBuffer, "uint16");
     passEncoder.drawIndexed(sphere.indexCount, SOLAR_SYSTEM.length);
+
+    // === 新增：绘制轨道 ===
+    passEncoder.setPipeline(orbitPipeline);
+    // 复用之前的 BindGroup (因为 Uniform 布局在两个 Shader 里是兼容的)
+    // 但为了严谨，最好让 orbitPipeline 也有自己的 BindGroup。
+    // 不过由于我们的 layout: 'auto' 且 group(0) binding(0) 定义完全一样，
+    // 这里直接复用 bindGroup 通常是可以的。
+    // 如果报错，需要为 orbitPipeline 专门 createBindGroup。
+    passEncoder.setBindGroup(0, orbitBindGroup);
+
+    // 绑定轨道的顶点
+    passEncoder.setVertexBuffer(0, orbitVertexBuffer);
+    // 绑定实例数据 (复用同一个 instanceBuffer)
+    passEncoder.setVertexBuffer(1, instanceBuffer);
+
+    // 绘制: (顶点数, 实例数)
+    // 顶点数 = orbitData.length / 3
+    passEncoder.draw(orbitData.length / 3, SOLAR_SYSTEM.length);
+
     passEncoder.end();
 
     device.queue.submit([commandEncoder.finish()]);
