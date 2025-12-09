@@ -15,4 +15,5 @@ export interface PlanetData {
   color: [number, number, number];
   texIndex: number;
   initialAngle: number;
+  parentName?: string;
 }

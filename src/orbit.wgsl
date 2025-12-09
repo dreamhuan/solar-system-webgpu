@@ -17,8 +17,11 @@ struct VertexOutput {
 
 @vertex
 fn vs_main(
-  @location(0) position: vec3<f32>, // 单位圆顶点
-  @location(4) i_orbitRadius: f32   // 从 Instance Buffer (Offset 4) 读取轨道半径
+  @location(0) position: vec3<f32>,
+  @location(4) i_orbitRadius: f32,
+  // locations 5,6,7,8 are used by the main shader
+  @location(9) i_orbitCenterX: f32,
+  @location(10) i_orbitCenterZ: f32
 ) -> VertexOutput {
   var output: VertexOutput;
 
@@ -26,9 +29,10 @@ fn vs_main(
   // 2. 我们现在的世界原点是 focusPos
   // 3. 所以太阳相对于我们的位置是 -focusPos
   let sunRelativePos = -uniforms.focusPos;
+  let orbitCenter = vec3<f32>(i_orbitCenterX, 0.0, i_orbitCenterZ);
 
-  // 4. 轨道的顶点位置 = (单位圆 * 半径) + 太阳相对位置
-  let worldPos = (position * i_orbitRadius) + sunRelativePos;
+  // 轨道的顶点位置 = (单位圆 * 半径) + 轨道中心位置(相对太阳) + 太阳相对Focus的位置
+  let worldPos = (position * i_orbitRadius) + orbitCenter + sunRelativePos;
 
   output.Position = uniforms.viewProjectionMatrix * vec4<f32>(worldPos, 1.0);
   return output;

@@ -17,6 +17,7 @@ struct VertexOutput {
   @location(2) Uv: vec2<f32>,
   @location(3) TexIndex: f32,
   @location(4) Color: vec3<f32>,
+  @location(5) SunRelativePos: vec3<f32>,
 }
 
 @vertex
@@ -28,9 +29,12 @@ fn vs_main(
   @location(3) i_radius: f32, 
   @location(4) i_distance: f32, 
   @location(5) i_relX: f32, // 这里我们不再用CPU传过来的relX，而是用 distance 重新算
-  @location(6) i_relZ: f32, // 这样能保证星球和轨道完全同步
-  @location(7) i_color: vec3<f32>, 
-  @location(8) i_texIndex: f32
+  @location(6) i_relZ: f32,
+  @location(7) i_color: vec3<f32>,
+  @location(8) i_texIndex: f32,
+  // Unused here, but needed for shared buffer layout
+  @location(9) i_orbitCenterX: f32,
+  @location(10) i_orbitCenterZ: f32
 ) -> VertexOutput {
   var output: VertexOutput;
 
@@ -58,9 +62,11 @@ fn vs_main(
 
   // 4. 最终坐标 = (本地旋转 * 半径) + 行星相对太阳位移 + 太阳相对Focus位移
   let finalRelPos = (rotatedPos * i_radius) + planetPosRelativeToSun + sunRelativePos;
+  let sunRelativeWorldPos = (rotatedPos * i_radius) + planetPosRelativeToSun;
 
   output.Position = uniforms.viewProjectionMatrix * vec4<f32>(finalRelPos, 1.0);
   output.WorldPos = finalRelPos;
+  output.SunRelativePos = sunRelativeWorldPos;
   output.Normal = rotatedNormal;
   output.Uv = uv;
   output.TexIndex = i_texIndex;
@@ -72,12 +78,13 @@ fn vs_main(
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   let N = normalize(input.Normal);
-  // 简单光照：假设光来自观察位置反向(近似)
-  let L = normalize(-input.WorldPos); 
+  // Correct lighting: Light source is always the Sun (0,0,0)
+  let L = normalize(-input.SunRelativePos); 
   var diffuse = max(dot(N, L), 0.0);
   var ambient = vec3<f32>(0.30, 0.30, 0.35) * uniforms.ambientStrength;
 
-  if (input.TexIndex < 0.1 || input.TexIndex > 8.5) {
+  // Sun is emissive
+  if (input.TexIndex < 0.1) {
     diffuse = 1.0;
     ambient = vec3<f32>(0.0);
   }

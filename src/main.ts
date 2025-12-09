@@ -58,11 +58,12 @@ async function init() {
   orbitVertexBuffer.unmap();
 
   // Instance Buffer
-  const tempInstanceData = new Float32Array(SOLAR_SYSTEM.length * 8);
+  // Instance Buffer (x10 floats per instance)
+  // Radius, OrbitRadius, RelX, RelZ, Color(3), TexIndex, OrbitCenterX, OrbitCenterZ
+  const tempInstanceData = new Float32Array(SOLAR_SYSTEM.length * 10);
   const instanceBuffer = device.createBuffer({
     size: tempInstanceData.byteLength,
-    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, 
-    mappedAtCreation: false,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
 
   // Uniform Buffer
@@ -71,13 +72,15 @@ async function init() {
 
   // --- Pipelines ---
   // Shared Instance Attributes Layout
-  const instanceAttrs = [
-    { shaderLocation: 3, offset: 0, format: "float32" as GPUVertexFormat },    // Radius
-    { shaderLocation: 4, offset: 4, format: "float32" as GPUVertexFormat },    // OrbitRadius (Distance)
-    { shaderLocation: 5, offset: 8, format: "float32" as GPUVertexFormat },    // RelX (to Sun)
-    { shaderLocation: 6, offset: 12, format: "float32" as GPUVertexFormat },   // RelZ (to Sun)
-    { shaderLocation: 7, offset: 16, format: "float32x3" as GPUVertexFormat }, // Color
-    { shaderLocation: 8, offset: 28, format: "float32" as GPUVertexFormat },   // TexIndex
+  const instanceAttrs: GPUVertexAttribute[] = [
+    { shaderLocation: 3, offset: 0, format: "float32" },   // Radius
+    { shaderLocation: 4, offset: 4, format: "float32" },   // OrbitRadius (Distance)
+    { shaderLocation: 5, offset: 8, format: "float32" },   // RelX (to Sun)
+    { shaderLocation: 6, offset: 12, format: "float32" },  // RelZ (to Sun)
+    { shaderLocation: 7, offset: 16, format: "float32x3"}, // Color
+    { shaderLocation: 8, offset: 28, format: "float32" },  // TexIndex
+    { shaderLocation: 9, offset: 32, format: "float32" },  // OrbitCenterX
+    { shaderLocation: 10, offset: 36, format: "float32" }, // OrbitCenterZ
   ];
 
   const module = device.createShaderModule({ code: shaderCode });
@@ -88,7 +91,7 @@ async function init() {
       entryPoint: "vs_main",
       buffers: [
         { arrayStride: 32, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 1, offset: 12, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] },
-        { arrayStride: 32, stepMode: "instance", attributes: instanceAttrs },
+        { arrayStride: 40, stepMode: "instance", attributes: instanceAttrs },
       ],
     },
     fragment: { module, entryPoint: "fs_main", targets: [{ format }] },
@@ -109,7 +112,7 @@ async function init() {
       entryPoint: "vs_main",
       buffers: [
         { arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }] }, // pos
-        { arrayStride: 32, stepMode: "instance", attributes: instanceAttrs }, // Use same instance buffer
+        { arrayStride: 40, stepMode: "instance", attributes: instanceAttrs }, // Use same instance buffer
       ],
     },
     fragment: { module: orbitModule, entryPoint: "fs_main", targets: [{ format, blend: { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" } } }] },
@@ -121,18 +124,26 @@ async function init() {
   const depthTexture = device.createTexture({ size: [canvas.width, canvas.height], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
 
   // --- GUI ---
-  const gui = new GUI({ title: "Solar Control" });
-  gui.add(state, "pauseOrbit").name("Pause Orbit");
-  gui.add(state, "pauseRotation").name("Pause Rotate");
-  gui.add(state, "timeScale", 0, 5).name("Time Speed");
-  gui.add(state, "focusTarget", SOLAR_SYSTEM.map((p) => p.name)).name("Focus On").onChange((name: string) => { if (name === "Sun") camera.reset(); });
+  const gui = new GUI({ title: "太阳系控制台" });
 
-  const modeFolder = gui.addFolder("Simulation Mode");
-  modeFolder.add(state, "trueScale").name("True Scale Mode");
-  modeFolder.add(state, "hideSun").name("Hide Sun");
-  modeFolder.add(state, "brightMode").name("Bright Mode");
-  modeFolder.add(state, "valSizeScale", 0.0, 5.0, 0.1).name("Universal Size Scale");
-  modeFolder.add(state, "valDistScale", 0.0, 2.0, 0.001).name("Universal Dist Scale");
+  const usageFolder = gui.addFolder("操作指南");
+  usageFolder.add({ fn: () => {} }, "fn").name("平移: 鼠标左键拖动");
+  usageFolder.add({ fn: () => {} }, "fn").name("旋转: 鼠标右键拖动");
+  usageFolder.add({ fn: () => {} }, "fn").name("缩放: 鼠标滚轮");
+  usageFolder.add({ fn: () => {} }, "fn").name("重置: 空格键");
+  usageFolder.open();
+  const controlFolder = gui.addFolder("控制");
+  controlFolder.add(state, "pauseOrbit").name("暂停公转");
+  controlFolder.add(state, "pauseRotation").name("暂停自转");
+  controlFolder.add(state, "timeScale", 0, 5).name("时间缩放");
+  controlFolder.add(state, "focusTarget", SOLAR_SYSTEM.map((p) => p.name)).name("聚焦目标").onChange((name: string) => { if (name === "Sun") camera.reset(); });
+
+  const modeFolder = gui.addFolder("模拟模式");
+  modeFolder.add(state, "trueScale").name("真实比例模式");
+  modeFolder.add(state, "hideSun").name("隐藏太阳");
+  modeFolder.add(state, "brightMode").name("明亮模式");
+  modeFolder.add(state, "valSizeScale", 0.0, 5.0, 0.1).name("行星大小缩放");
+  modeFolder.add(state, "valDistScale", 0.0, 2.0, 0.001).name("行星距离缩放");
   modeFolder.open();
 
   // --- Render Loop ---
@@ -141,22 +152,39 @@ async function init() {
   let orbitTime = 0;
   let rotationTime = 0;
   
-  // 存储相对于太阳的坐标 (用于计算 Focus)
   const sunRelPositions: {x: number, z: number}[] = new Array(SOLAR_SYSTEM.length).fill(null).map(() => ({x:0, z:0}));
+  const orbitCenters: {x: number, z: number}[] = new Array(SOLAR_SYSTEM.length).fill(null).map(() => ({x:0, z:0}));
 
   function frame() {
     const dt = 0.01 * state.timeScale;
     if (!state.pauseOrbit) orbitTime += dt;
     if (!state.pauseRotation) rotationTime += dt;
 
-    // 1. CPU 计算相对于太阳的位置
+    // 1. CPU 计算所有星体相对于太阳的位置
     SOLAR_SYSTEM.forEach((planet, i) => {
       let distBase = state.trueScale ? (planet.realDistance * AU_TO_EARTH_RADIUS) : planet.artisticDistance;
       let currentDist = distBase * state.valDistScale;
       
       const angle = -1.0 * (planet.initialAngle + orbitTime * planet.speed * 0.1);
-      sunRelPositions[i].x = Math.cos(angle) * currentDist;
-      sunRelPositions[i].z = Math.sin(angle) * currentDist;
+      let localX = Math.cos(angle) * currentDist;
+      let localZ = Math.sin(angle) * currentDist;
+
+      if (planet.parentName) {
+        const parentIdx = SOLAR_SYSTEM.findIndex(p => p.name === planet.parentName);
+        if (parentIdx !== -1) {
+          orbitCenters[i].x = sunRelPositions[parentIdx].x;
+          orbitCenters[i].z = sunRelPositions[parentIdx].z;
+          sunRelPositions[i].x = sunRelPositions[parentIdx].x + localX;
+          sunRelPositions[i].z = sunRelPositions[parentIdx].z + localZ;
+        } else {
+          // Fallback if parent not found
+          sunRelPositions[i].x = localX;
+          sunRelPositions[i].z = localZ;
+        }
+      } else {
+        sunRelPositions[i].x = localX;
+        sunRelPositions[i].z = localZ;
+      }
     });
 
     // 2. 确定 Focus Offset (绝对空间中 Focus 的位置)
@@ -172,7 +200,7 @@ async function init() {
 
     // 3. 更新 Instance Buffer
     SOLAR_SYSTEM.forEach((planet, i) => {
-      const base = i * 8;
+      const base = i * 10;
       
       let rBase = state.trueScale ? (planet.realRadius * EARTH_BASE_RADIUS) : planet.artisticRadius;
       let finalRadius = rBase * state.valSizeScale;
@@ -182,18 +210,19 @@ async function init() {
       let finalOrbitRadius = dBase * state.valDistScale;
 
       tempInstanceData[base + 0] = finalRadius;
-      tempInstanceData[base + 1] = finalOrbitRadius; // i_distance / OrbitRadius
-      tempInstanceData[base + 2] = sunRelPositions[i].x; // i_relX (relative to Sun)
-      tempInstanceData[base + 3] = sunRelPositions[i].z; // i_relZ (relative to Sun)
+      tempInstanceData[base + 1] = finalOrbitRadius;
+      tempInstanceData[base + 2] = sunRelPositions[i].x;
+      tempInstanceData[base + 3] = sunRelPositions[i].z;
       tempInstanceData[base + 4] = planet.color[0];
       tempInstanceData[base + 5] = planet.color[1];
       tempInstanceData[base + 6] = planet.color[2];
       tempInstanceData[base + 7] = planet.texIndex;
+      tempInstanceData[base + 8] = orbitCenters[i].x;
+      tempInstanceData[base + 9] = orbitCenters[i].z;
     });
     device.queue.writeBuffer(instanceBuffer, 0, tempInstanceData);
 
     // 4. 更新相机
-    vec3.set(camera.target, 0, 0, 0);
     camera.updateMatrix();
 
     // 5. Uniforms

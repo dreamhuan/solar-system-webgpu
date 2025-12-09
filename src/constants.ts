@@ -109,6 +109,18 @@ export const SOLAR_SYSTEM: PlanetData[] = [
     texIndex: 8,
     initialAngle: Math.random() * 6,
   },
+  {
+    name: "Moon",
+    artisticRadius: 0.2,
+    artisticDistance: 2.0,
+    realRadius: 0.27,
+    realDistance: 0.00257, // AU
+    speed: 12.0, // Much faster orbit
+    color: [1, 1, 1],
+    texIndex: 9,
+    initialAngle: Math.random() * 6,
+    parentName: "Earth",
+  },
 ];
 
 export const TEXTURE_URLS = SOLAR_SYSTEM.map((p) => `${p.name}.jpg`);
