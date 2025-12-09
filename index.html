@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WebGPU Solar System</title>
+    <style>
+      body {
+        margin: 0;
+        overflow: hidden;
+        background-color: #000;
+        /* 添加星空背景图 */
+        background-image: linear-gradient(
+            rgba(0, 0, 0, 0.6),
+            rgba(0, 0, 0, 0.6)
+          ),
+          url("/solar-system-webgpu/heic1509a.jpg");
+        background-size: cover;
+      }
+      canvas {
+        display: block;
+      }
+    </style>
+    <script type="module" crossorigin src="/solar-system-webgpu/assets/index-Be6h42A9.js"></script>
+  </head>
+  <body>
+    <canvas id="app"></canvas>
+  </body>
+</html>
