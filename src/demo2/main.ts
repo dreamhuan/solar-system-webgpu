@@ -21,14 +21,15 @@ async function init() {
   context.configure({ device, format, alphaMode: "premultiplied" });
 
   // 2. 准备数据：我们的原材料 (顶点缓冲区)
-  //    12个顶点，每个顶点有6个数字 (x, y, z, r, g, b)
+  //    4个顶点，每个顶点有6个数字 (x, y, z, r, g, b)
   //    数据是紧密排列在一个数组里的
+  // prettier-ignore
   const vertices = new Float32Array([
-    //  X,    Y,     Z,      R,   G,   B
-    -0.5, -0.5,  -0.408,  0.0, 1.0, 0.0,
-    0.5, -0.5,  -0.408,  1.0, 0.0, 0.0,
-    0, 0.366,  -0.408,  0.0, 0.0, 1.0,
-    0.0,  0.0,   0.408,    1.0, 1.0, 0.0,
+    //  X,    Y,       Z,    R,   G,   B
+    -0.5,  -0.5,  -0.408,  1.0, 0.0, 0.0,
+     0.5,  -0.5,  -0.408,  0.0, 1.0, 0.0,
+       0, 0.366,  -0.408,  0.0, 0.0, 1.0,
+     0.0,   0.0,   0.408,  1.0, 1.0, 1.0,
   ]);
 
   // 创建一个缓冲区对象
@@ -42,17 +43,15 @@ async function init() {
   new Float32Array(vertexBuffer.getMappedRange()).set(vertices);
   vertexBuffer.unmap();
 
-   // 2. **【新增】** 创建索引缓冲区 (Index Buffer)
+  // 创建索引缓冲区 (Index Buffer)
   //    定义了4个三角形面，总共12个索引
+  // prettier-ignore
   const indexData = new Uint16Array([
-    // 底面 (红-蓝-黄)
-    1, 2, 3,
-    // 侧面1 (绿-红-蓝)
-    0, 1, 2,
-    // 侧面2 (绿-蓝-黄)
-    0, 2, 3,
-    // 侧面3 (绿-黄-红)
-    0, 3, 1,
+    // 混和插值模式下每一行的顺序无所谓，flat插值模式下第一个值很关键
+    0, 1, 2, // 底面
+    1, 2, 3, // 侧面1
+    2, 3, 0, // 侧面2
+    3, 0, 1, // 侧面3
   ]);
   const indexBuffer = device.createBuffer({
     size: indexData.byteLength,
@@ -64,7 +63,6 @@ async function init() {
   indexBuffer.unmap();
 
   // 2. 创建 Uniform 缓冲区来存放 MVP 矩阵
-  const mvpMatrix = mat4.create(); // 使用 gl-matrix 创建一个 4x4 矩阵
   const uniformBuffer = device.createBuffer({
     size: 4 * 4 * 4, // 4x4 矩阵, 每个元素是 f32 (4字节)
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -98,20 +96,12 @@ async function init() {
     primitive: {
       topology: "triangle-list", // 我们画的是一个个三角形
     },
-    // 4. **【新增】** 开启深度测试
+    // 开启深度测试
     depthStencil: {
       depthWriteEnabled: true,
       depthCompare: "less",
       format: "depth24plus", // 深度缓冲的格式
     },
-  });
-
-  // 5. **【新增】** 创建一个深度纹理
-  // 它的尺寸必须和画布完全一样
-  const depthTexture = device.createTexture({
-    size: [canvas.width, canvas.height],
-    format: "depth24plus",
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
 
   // 6. 创建绑定组，将 uniformBuffer 连接到着色器
@@ -126,7 +116,11 @@ async function init() {
   });
 
   // 7. 设置 MVP 矩阵
+  const mvpMatrix = mat4.create();
+  const modelMatrix = mat4.create();
+  const viewMatrix = mat4.create();
   const projectionMatrix = mat4.create();
+
   mat4.perspective(
     projectionMatrix,
     Math.PI / 4,
@@ -135,7 +129,6 @@ async function init() {
     100.0
   );
 
-  const viewMatrix = mat4.create();
   mat4.lookAt(
     viewMatrix,
     vec3.fromValues(0, 0, 5),
@@ -143,8 +136,13 @@ async function init() {
     vec3.fromValues(0, 1, 0)
   );
 
-  const modelMatrix = mat4.create();
-
+  // 创建一个深度纹理
+  // 它的尺寸必须和画布完全一样
+  const depthTexture = device.createTexture({
+    size: [canvas.width, canvas.height],
+    format: "depth24plus",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT,
+  });
   // 4. 渲染循环 (下达生产命令)
   function frame() {
     // 更新旋转
@@ -181,14 +179,12 @@ async function init() {
     passEncoder.setBindGroup(0, bindGroup);
     // 将我们的顶点缓冲区设置到0号槽位
     passEncoder.setVertexBuffer(0, vertexBuffer);
-    // 3. **【新增】** 绑定索引缓冲区
+    // 绑定索引缓冲区
     passEncoder.setIndexBuffer(indexBuffer, "uint16");
 
-    // 4. **【修改】** 使用带索引的绘制指令
+    // 使用带索引的绘制指令
     //    我们不再告诉GPU画多少个顶点，而是画多少个“索引”
     passEncoder.drawIndexed(indexData.length, 1, 0, 0, 0);
-    // 执行绘制！ 12个顶点，1个实例
-    // passEncoder.draw(12, 1, 0, 0);
     // 结束这轮绘制
     passEncoder.end();
 
