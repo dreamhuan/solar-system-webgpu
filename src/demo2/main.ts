@@ -23,13 +23,16 @@ async function init() {
   // 2. 准备数据：我们的原材料 (顶点缓冲区)
   //    4个顶点，每个顶点有6个数字 (x, y, z, r, g, b)
   //    数据是紧密排列在一个数组里的
+  // NDC是左手系 X: [-1, 1] (左 -> 右) Y: [-1, 1] (下 -> 上) Z: [0, 1] (近 -> 远)
+  // 其他坐标都是右手系，z朝自己为正
+  // 三棱锥，顶点在y轴上，底面在y=-0.204上，戳向z+方向
   // prettier-ignore
   const vertices = new Float32Array([
-    //  X,    Y,       Z,    R,   G,   B
-    -0.5,  -0.5,  -0.408,  1.0, 0.0, 0.0,
-     0.5,  -0.5,  -0.408,  0.0, 1.0, 0.0,
-       0, 0.366,  -0.408,  0.0, 0.0, 1.0,
-     0.0,   0.0,   0.408,  1.0, 1.0, 1.0,
+    //  X,      Y,       Z,        R,   G,   B
+     0.0,    0.612,    0.0,       1.0, 0.0, 0.0, // 顶
+    -0.5,   -0.204,   -0.288,     0.0, 1.0, 0.0, // 底左
+     0.5,   -0.204,   -0.288,     0.0, 0.0, 1.0, // 底右
+     0.0,   -0.204,    0.577,     1.0, 1.0, 1.0, // 底前
   ]);
 
   // 创建一个缓冲区对象
@@ -121,6 +124,7 @@ async function init() {
   const viewMatrix = mat4.create();
   const projectionMatrix = mat4.create();
 
+  // 透视，最近0.1最远100.0
   mat4.perspective(
     projectionMatrix,
     Math.PI / 4,
@@ -128,13 +132,16 @@ async function init() {
     0.1,
     100.0
   );
+  console.log("projectionMatrix", formatMat4(projectionMatrix));
 
+  // 从屏幕外z=5(0,0,5)看向屏幕(0,0,0)，头顶朝上(0,1,0)
   mat4.lookAt(
     viewMatrix,
     vec3.fromValues(0, 0, 5),
     vec3.fromValues(0, 0, 0),
     vec3.fromValues(0, 1, 0)
   );
+  console.log("viewMatrix", formatMat4(viewMatrix));
 
   // 创建一个深度纹理
   // 它的尺寸必须和画布完全一样
@@ -144,13 +151,21 @@ async function init() {
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
   // 4. 渲染循环 (下达生产命令)
+  let renderCount = 0;
   function frame() {
+    renderCount++;
     // 更新旋转
     const now = Date.now() / 1000;
+    // 模型矩阵随时间绕着y轴旋转
     mat4.fromYRotation(modelMatrix, now);
+    if (renderCount % 60 === 0) {
+      console.log("modelMatrix", formatMat4(modelMatrix));
+    }
 
-    // 计算最终的 MVP 矩阵
+    // 计算最终的 MVP 矩阵: mvp = p * v * m
+    // mvpMatrix = viewMatrix * modelMatrix
     mat4.multiply(mvpMatrix, viewMatrix, modelMatrix);
+    // mvpMatrix = projectionMatrix * mvpMatrix
     mat4.multiply(mvpMatrix, projectionMatrix, mvpMatrix);
 
     device.queue.writeBuffer(uniformBuffer, 0, mvpMatrix as any);
@@ -198,3 +213,30 @@ async function init() {
 }
 
 init().catch(console.error);
+
+/**
+ * 将 gl-matrix 的 mat4 (Float32Array) 格式化为可读的 4x4 矩阵字符串。
+ * @param m 要打印的 mat4 矩阵。
+ * @param precision 小数点后的精度，默认为4位。
+ * @returns 格式化后的字符串。
+ */
+function formatMat4(m: mat4, precision = 4): string {
+  let s = "mat4(\n";
+  for (let i = 0; i < 4; i++) {
+    s += "  ";
+    for (let j = 0; j < 4; j++) {
+      // 注意：gl-matrix 是列主序存储，但为了方便阅读，
+      // 我们通常按行打印。这里的索引 m[i*4 + j] 是按行读取。
+      // 如果你想按列读取以匹配 GLSL 的构造函数，应该是 m[j*4 + i]。
+      // 我们这里按行打印，更符合视觉直觉。
+      const index = j * 4 + i; // 按列读取和打印
+      s += m[index].toFixed(precision).padStart(precision + 4, " ");
+      if (j < 3) {
+        s += ", ";
+      }
+    }
+    s += "\n";
+  }
+  s += ")";
+  return s;
+}

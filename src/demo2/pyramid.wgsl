@@ -9,8 +9,8 @@ var<uniform> mvpMatrix: mat4x4<f32>;
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   // 在这里添加 flat 插值属性, 每个面就会使用第一个顶点作为颜色
-  // @location(0) @interpolate(flat) color: vec4<f32>,
-  @location(0) color: vec4<f32>,
+  @location(0) @interpolate(flat) color: vec4<f32>,
+  // @location(0) color: vec4<f32>,
 };
 
 // --- 顶点着色器 ---
