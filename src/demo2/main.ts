@@ -2,7 +2,7 @@
 
 // 1. 导入我们的着色器代码
 import pyramidShaderCode from "./pyramid.wgsl?raw";
-import { mat4, vec3 } from "gl-matrix";
+import { mat4, vec2, vec3 } from "gl-matrix";
 
 async function init() {
   const canvas = document.querySelector<HTMLCanvasElement>("#app")!;
@@ -150,14 +150,67 @@ async function init() {
     format: "depth24plus",
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
+
+  // --- 【新增】鼠标控制的状态变量 ---
+  let isDragging = false;
+  let lastMouseX = 0;
+  let lastMouseY = 0;
+
+  // 用一个 vec2 来存储总的旋转角度
+  // rotation[0] 存储绕 Y 轴的旋转 (左右拖动)
+  // rotation[1] 存储绕 X 轴的旋转 (上下拖动)
+  const rotation = vec2.fromValues(0, 0);
+  // --- 【新增】添加鼠标事件监听器 ---
+  canvas.addEventListener("pointerdown", (e) => {
+    isDragging = true;
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  });
+
+  window.addEventListener("pointerup", (e) => {
+    isDragging = false;
+  });
+
+  // 在 window 上监听 move 和 up 事件，可以防止鼠标移出 canvas 后失去响应
+  window.addEventListener("pointermove", (e) => {
+    if (!isDragging) return;
+
+    const deltaX = e.clientX - lastMouseX;
+    const deltaY = e.clientY - lastMouseY;
+
+    // 根据鼠标移动更新旋转角度
+    // 乘以一个灵敏度系数来控制旋转速度
+    const sensitivity = 0.01;
+    rotation[0] += deltaX * sensitivity; // 绕 Y 轴
+    rotation[1] += deltaY * sensitivity; // 绕 X 轴
+
+    // 【可选】限制上下旋转的角度，防止“万向节死锁”或倒转
+    const maxPitch = Math.PI / 2 - 0.01; // 接近90度
+    const minPitch = -Math.PI / 2 + 0.01; // 接近-90度
+    rotation[1] = Math.max(minPitch, Math.min(maxPitch, rotation[1]));
+
+    lastMouseX = e.clientX;
+    lastMouseY = e.clientY;
+  });
+
   // 4. 渲染循环 (下达生产命令)
   let renderCount = 0;
   function frame() {
     renderCount++;
-    // 更新旋转
-    const now = Date.now() / 1000;
-    // 模型矩阵随时间绕着y轴旋转
-    mat4.fromYRotation(modelMatrix, now);
+    // // 更新旋转
+    // const now = Date.now() / 1000;
+    // // 模型矩阵随时间绕着y轴旋转
+    // mat4.fromYRotation(modelMatrix, now);
+
+    // --- 【修改】根据鼠标输入的旋转角度来构建模型矩阵 ---
+    // 1. 先重置 modelMatrix 为单位矩阵
+    mat4.identity(modelMatrix);
+    // 2. 依次应用旋转
+    //    先绕 Y 轴旋转 (左右)
+    mat4.rotateY(modelMatrix, modelMatrix, rotation[0]);
+    //    再绕 X 轴旋转 (上下)
+    mat4.rotateX(modelMatrix, modelMatrix, rotation[1]);
+
     if (renderCount % 60 === 0) {
       console.log("modelMatrix", formatMat4(modelMatrix));
     }
