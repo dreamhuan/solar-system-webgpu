@@ -50,16 +50,20 @@ fn vs_main(
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   // --- 最终修正的光照模型 (更标准的 Blinn-Phong 实现) ---
 
-  let lightColor = vec3<f32>(1.0, 1.0, 0.95);
-  let lightDirection = normalize(vec3<f32>(0.5, 1.0, 0.75));
-  let specularStrength: f32 = 0.5;
-  let shininess: f32 = 32.0;
-  
-  // 【修改】环境光强度现在是一个单独的系数
-  let ambientStrength: f32 = 0.2;
+// --- 光照参数 (常量) ---
+  let lightColor = vec3<f32>(1.0, 1.0, 0.95); // 稍微偏暖的白色光源
+  let lightDirection = normalize(vec3<f32>(0.5, 1.0, 0.75)); // 从世界斜上方来的光
+  let specularStrength: f32 = 0.5;   // 高光强度
+  let shininess: f32 = 32.0;         // 高光锐利度
+  let ambientStrength: f32 = 0.2;    // 环境光强度
 
+  // --- 动态计算的向量 ---
   let normal = normalize(input.worldNormal);
   let viewDirection = normalize(uniforms.cameraPos - input.worldPos);
+
+  // 引入能量守恒的思想
+  let kS = specularStrength; // 镜面反射系数
+  let kD = 1.0 - kS;        // 漫反射系数 = 1 - 镜面反射系数
 
   // 1. 环境光 (Ambient)
   //    公式: 环境光颜色 * 物体颜色
@@ -68,14 +72,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
   // 2. 漫反射 (Diffuse)
   //    公式: 光强 * 光颜色 * 物体颜色
   let diffuseIntensity = max(dot(normal, lightDirection), 0.0);
-  let diffuse = diffuseIntensity * lightColor * input.color.rgb;
+  let diffuse = diffuseIntensity * lightColor * input.color.rgb * kD;
 
   // 3. 镜面高光 (Specular)
   //    公式: 光强 * 光颜色 (高光颜色)
   let halfwayDirection = normalize(lightDirection + viewDirection);
   let specAngle = max(dot(normal, halfwayDirection), 0.0);
   let specularIntensity = pow(specAngle, shininess);
-  let specular = specularStrength * specularIntensity * lightColor;
+  let specular = specularStrength * specularIntensity * lightColor * kS;
 
   // 最终颜色 = 环境光 + 漫反射 + 高光
   let finalColor = ambient + diffuse + specular;
