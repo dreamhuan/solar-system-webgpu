@@ -105,3 +105,39 @@ npm run dev
 - **轨道半长径**：38.44 万千米（约 0.00257 AU）注：此为地月平均距离。
 - **自转周期**：27.32 倍地球日 注：月球被地球“潮汐锁定”，自转周期与公转周期相同。
 - **公转周期**：27.32 倍地球日（约 0.075 倍地球年）注：此为恒星月（Sidereal Month）周期。
+
+## Demo 为学习过程
+
+webgpu 从 0 速成
+
+### demo1
+
+绘制三角形
+
+### demo2
+
+绘制三棱锥
+
+### demo3
+
+Blinn-Phong 基础光照模型
+
+### demo4
+
+颜色纹理
+
+### demo5
+
+颜色和法线纹理
+
+### demo6
+
+PBR 渲染（Physically Based Rendering，基于物理的渲染）使用 Cook-Torrance 微表面 BRDF 模型
+
+### demo7
+
+外部 gltf 格式的模型渲染
+
+### demo8
+
+IBL(Image-Based Lighting, 基于图像的照明) 的光照模型以及背景包围盒渲染

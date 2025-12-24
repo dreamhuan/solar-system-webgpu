@@ -1,7 +1,8 @@
 import { load } from "@loaders.gl/core";
 import { GLTFLoader } from "@loaders.gl/gltf";
-import { mat4, vec3, quat } from "gl-matrix"; // 确保引入了 quat
+import { mat4, vec3, quat } from "gl-matrix";
 import pbrShaderCode from "./pbr.wgsl?raw";
+import skyboxShaderCode from "./skybox.wgsl?raw";
 
 interface DrawCommand {
   pipeline: GPURenderPipeline;
@@ -32,6 +33,80 @@ const GLTF_TYPE_MAP: { [key: string]: { length: number } } = {
   MAT4: { length: 16 },
 };
 
+// --- 工具函数：加载并切割十字形 Cubemap ---
+async function createCubemapTexture(device: GPUDevice, url: string) {
+  const img = new Image();
+  img.src = url;
+  await new Promise((resolve) => (img.onload = resolve));
+
+  const faceWidth = img.width / 4;
+  const faceHeight = img.height / 3;
+
+  // 提取 6 个面 (WebGPU 顺序: +X, -X, +Y, -Y, +Z, -Z)
+  // 假设十字图布局:
+  //    +Y
+  // -X +Z +X -Z  <-- 这里常见的排列，根据具体图片可能需要调整 offset
+  //    -Y
+  // 注意：标准 Cubemap 十字图通常是:
+  //      Top
+  // Left Front Right Back
+  //      Bottom
+  // 对应:
+  //      +Y
+  // -X   +Z   +X    -Z
+  //      -Y
+
+  const faces = [
+    { x: 2, y: 1 }, // +X (Right)
+    { x: 0, y: 1 }, // -X (Left)
+    { x: 1, y: 0 }, // +Y (Top)
+    { x: 1, y: 2 }, // -Y (Bottom)
+    { x: 1, y: 1 }, // +Z (Front)
+    { x: 3, y: 1 }, // -Z (Back)
+  ];
+
+  const texture = device.createTexture({
+    dimension: "2d",
+    size: [faceWidth, faceHeight, 6],
+    format: "rgba8unorm",
+    usage:
+      GPUTextureUsage.TEXTURE_BINDING |
+      GPUTextureUsage.COPY_DST |
+      GPUTextureUsage.RENDER_ATTACHMENT,
+  });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = faceWidth;
+  canvas.height = faceHeight;
+  const ctx = canvas.getContext("2d");
+
+  for (let i = 0; i < 6; i++) {
+    if (!ctx) break;
+    const { x, y } = faces[i];
+    ctx.drawImage(
+      img,
+      x * faceWidth,
+      y * faceHeight,
+      faceWidth,
+      faceHeight,
+      0,
+      0,
+      faceWidth,
+      faceHeight
+    );
+
+    // 将 Canvas 内容上传到纹理数组层
+    const bitmap = await createImageBitmap(canvas);
+    device.queue.copyExternalImageToTexture(
+      { source: bitmap },
+      { texture, origin: [0, 0, i] },
+      [faceWidth, faceHeight]
+    );
+  }
+
+  return texture;
+}
+
 async function init() {
   // --- 1. WebGPU 初始化 ---
   const canvas = document.querySelector("canvas") as HTMLCanvasElement;
@@ -51,19 +126,40 @@ async function init() {
     usage: GPUTextureUsage.RENDER_ATTACHMENT,
   });
 
-  // --- 2. 创建绑定组布局和 PBR 管线 ---
+  // --- 2. 加载环境贴图 ---
+  const cubemapTexture = await createCubemapTexture(
+    device,
+    "StandardCubeMap.png"
+  );
+  const cubemapSampler = device.createSampler({
+    magFilter: "linear",
+    minFilter: "linear",
+    mipmapFilter: "linear",
+  });
+
+  // --- 3. 创建绑定组布局 ---
+
+  // 修改 frameBindGroupLayout 以包含环境贴图和采样器
   const frameBindGroupLayout = device.createBindGroupLayout({
     entries: [
       {
         binding: 0,
         visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
         buffer: {},
-      },
+      }, // Uniforms
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} }, // Env Sampler
+      {
+        binding: 2,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { viewDimension: "cube" },
+      }, // Env Texture
     ],
   });
+
   const nodeBindGroupLayout = device.createBindGroupLayout({
     entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: {} }],
   });
+
   const materialBindGroupLayout = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
@@ -73,6 +169,60 @@ async function init() {
     ],
   });
 
+  // --- 4. 创建 Skybox 渲染管线 ---
+  const skyboxPipelineLayout = device.createPipelineLayout({
+    bindGroupLayouts: [frameBindGroupLayout],
+  });
+  const skyboxPipeline = device.createRenderPipeline({
+    layout: skyboxPipelineLayout,
+    vertex: {
+      module: device.createShaderModule({ code: skyboxShaderCode }),
+      entryPoint: "vs_main",
+      buffers: [
+        {
+          arrayStride: 12,
+          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }],
+        },
+      ],
+    },
+    fragment: {
+      module: device.createShaderModule({ code: skyboxShaderCode }),
+      entryPoint: "fs_main",
+      targets: [{ format }],
+    },
+    depthStencil: {
+      depthWriteEnabled: false, // 天空盒不写入深度，作为背景
+      depthCompare: "less-equal",
+      format: "depth24plus",
+    },
+    primitive: { topology: "triangle-list" },
+  });
+
+  // 生成 Skybox 几何体 (简单的立方体)
+  // prettier-ignore
+  const skyboxVertices = new Float32Array([
+    // 后 (Back, -Z)
+    -1,  1, -1,   -1, -1, -1,    1, -1, -1,    1, -1, -1,    1,  1, -1,   -1,  1, -1,
+    // 左 (Left, -X)
+    -1, -1,  1,   -1, -1, -1,   -1,  1, -1,   -1,  1, -1,   -1,  1,  1,   -1, -1,  1,
+    // 右 (Right, +X)
+     1, -1, -1,    1, -1,  1,    1,  1,  1,    1,  1,  1,    1,  1, -1,    1, -1, -1,
+    // 前 (Front, +Z)
+    -1, -1,  1,   -1,  1,  1,    1,  1,  1,    1,  1,  1,    1, -1,  1,   -1, -1,  1,
+    // 上 (Top, +Y)
+    -1,  1, -1,    1,  1, -1,    1,  1,  1,    1,  1,  1,   -1,  1,  1,   -1,  1, -1,
+    // 下 (Bottom, -Y)
+    -1, -1, -1,   -1, -1,  1,    1, -1, -1,    1, -1, -1,   -1, -1,  1,    1, -1,  1
+  ]);
+  const skyboxBuffer = device.createBuffer({
+    size: skyboxVertices.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+    mappedAtCreation: true,
+  });
+  new Float32Array(skyboxBuffer.getMappedRange()).set(skyboxVertices);
+  skyboxBuffer.unmap();
+
+  // --- 5. 创建 PBR 渲染管线 ---
   const pipelineLayout = device.createPipelineLayout({
     bindGroupLayouts: [
       frameBindGroupLayout,
@@ -118,12 +268,13 @@ async function init() {
     },
   });
 
-  // --- 3. 加载资源 ---
+  // --- 6. 加载模型资源 ---
   const gltfRaw = await load("mig-23_mld/scene.gltf", GLTFLoader);
   const gltf = gltfRaw.json;
   const binaryBuffers = gltfRaw.buffers;
   const loadedImages = gltfRaw.images;
 
+  // ... (保留之前的 fallbackSampler/Texture 代码) ...
   const fallbackSampler = device.createSampler({
     magFilter: "linear",
     minFilter: "linear",
@@ -173,7 +324,7 @@ async function init() {
     return buffer;
   };
 
-  // --- 4. 遍历场景图，创建绘制指令 ---
+  // --- 7. 处理场景节点 ---
   const sceneMin = vec3.fromValues(Infinity, Infinity, Infinity);
   const sceneMax = vec3.fromValues(-Infinity, -Infinity, -Infinity);
   const drawCommands: DrawCommand[] = [];
@@ -212,6 +363,7 @@ async function init() {
       for (const primitive of mesh.primitives) {
         if (primitive.attributes.POSITION === undefined) continue;
 
+        // ... (保留之前的 Bounds 计算) ...
         const posAccessor = gltf.accessors[primitive.attributes.POSITION];
         if (posAccessor.min && posAccessor.max) {
           const min = posAccessor.min as vec3,
@@ -257,7 +409,7 @@ async function init() {
           : device.createBuffer({
               size: posAccessor.count * 16,
               usage: GPUBufferUsage.VERTEX,
-            });
+            }); // Dummy
 
         const indexBuffer = createBufferFromAccessor(
           primitive.indices,
@@ -271,7 +423,6 @@ async function init() {
         if (!materialBindGroup) {
           const material = gltf.materials[primitive.material];
           const pbrInfo = material?.pbrMetallicRoughness;
-          const normalInfo = material?.normalTexture;
 
           const createTextureFromInfo = (texInfo: any) => {
             if (!texInfo || gltf.textures[texInfo.index]?.source === undefined)
@@ -295,7 +446,7 @@ async function init() {
           };
 
           const colorTex = createTextureFromInfo(pbrInfo?.baseColorTexture);
-          const normalTex = createTextureFromInfo(normalInfo);
+          const normalTex = createTextureFromInfo(material?.normalTexture);
           const metalRoughTex = createTextureFromInfo(
             pbrInfo?.metallicRoughnessTexture
           );
@@ -323,49 +474,69 @@ async function init() {
         });
       }
     }
-
-    if (node.children) {
-      node.children.forEach((childIndex: number) =>
-        processNode(childIndex, worldMatrix)
-      );
-    }
+    if (node.children)
+      node.children.forEach((i: number) => processNode(i, worldMatrix));
   };
 
   const rootNodes = gltf.scenes[gltf.scene || 0].nodes;
-  for (const rootIndex of rootNodes) {
-    processNode(rootIndex, mat4.create());
-  }
+  for (const rootIndex of rootNodes) processNode(rootIndex, mat4.create());
 
-  // --- 5. 自动相机与渲染循环 ---
+  // --- 8. 相机与循环 ---
   const center = vec3.add(vec3.create(), sceneMin, sceneMax);
   vec3.scale(center, center, 0.5);
   const sizeVec = vec3.subtract(vec3.create(), sceneMax, sceneMin);
   const radius = Math.max(sizeVec[0], Math.max(sizeVec[1], sizeVec[2])) * 0.5;
 
-  console.log("Model Center:", center, "Model Radius:", radius);
-
   const frameUniformBuffer = device.createBuffer({
     size: 80,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  const skyboxUniformBuffer = device.createBuffer({
+    size: 64,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // PBR 全局绑定组 (Buffer + EnvMap + Sampler)
   const frameBindGroup = device.createBindGroup({
     layout: frameBindGroupLayout,
-    entries: [{ binding: 0, resource: { buffer: frameUniformBuffer } }],
+    entries: [
+      { binding: 0, resource: { buffer: frameUniformBuffer } },
+      { binding: 1, resource: cubemapSampler },
+      {
+        binding: 2,
+        resource: cubemapTexture.createView({ dimension: "cube" }),
+      },
+    ],
+  });
+
+  // Skybox 绑定组 (使用自己的 Uniform Buffer，但共享同样的 Layout 结构如果可以，这里为了简单 Skybox shader 只用了一个 binding 0 做矩阵，后面加了纹理)
+  // 注意：Skybox Shader 代码中绑定了 buffer, sampler, texture。
+  // 为了复用，我们可以直接用 frameBindGroup，但是 Skybox 需要不同的 Matrix (去除位移)。
+  // 所以我们新建一个 BindGroup，texture/sampler 复用，matrix 单独给。
+  const skyboxBindGroup = device.createBindGroup({
+    layout: frameBindGroupLayout,
+    entries: [
+      { binding: 0, resource: { buffer: skyboxUniformBuffer } }, // 专用 Matrix Buffer
+      { binding: 1, resource: cubemapSampler },
+      {
+        binding: 2,
+        resource: cubemapTexture.createView({ dimension: "cube" }),
+      },
+    ],
   });
 
   const projectionMatrix = mat4.create(),
     viewMatrix = mat4.create(),
     viewProjMatrix = mat4.create();
   let cameraPos = vec3.create();
-
-  // --- 鼠标交互控制 (四元数累积版) ---
   const cameraRotation = quat.create();
-  quat.rotateX(cameraRotation, cameraRotation, -Math.PI / 6); // 初始俯仰角
+  quat.rotateX(cameraRotation, cameraRotation, -Math.PI / 6);
   let cameraDistance = radius * 2.5;
+
+  // ... (保留鼠标交互代码) ...
   let isDragging = false,
     lastMouseX = 0,
     lastMouseY = 0;
-
   canvas.addEventListener("pointerdown", (e) => {
     isDragging = true;
     lastMouseX = e.clientX;
@@ -377,40 +548,30 @@ async function init() {
     const deltaX = e.clientX - lastMouseX;
     const deltaY = e.clientY - lastMouseY;
     const sensitivity = 0.005;
-
-    const yawDelta = quat.create();
+    const yawDelta = quat.create(),
+      pitchDelta = quat.create();
     quat.setAxisAngle(yawDelta, [0, 1, 0], -deltaX * sensitivity);
-
-    const pitchDelta = quat.create();
     quat.setAxisAngle(pitchDelta, [1, 0, 0], -deltaY * sensitivity);
-
     quat.multiply(cameraRotation, yawDelta, cameraRotation);
     quat.multiply(cameraRotation, cameraRotation, pitchDelta);
     quat.normalize(cameraRotation, cameraRotation);
-
     lastMouseX = e.clientX;
     lastMouseY = e.clientY;
   });
-
   canvas.addEventListener(
     "wheel",
     (e) => {
       e.preventDefault();
       cameraDistance *= 1 + e.deltaY * 0.001;
-      cameraDistance = Math.max(
-        radius * 0.1,
-        Math.min(radius * 10, cameraDistance)
-      );
     },
     { passive: false }
   );
 
   function frame() {
-    // 计算相机位置和朝向
+    // 1. 计算相机
     const offset = vec3.fromValues(0, 0, cameraDistance);
     vec3.transformQuat(offset, offset, cameraRotation);
     vec3.add(cameraPos, center, offset);
-
     const upVector = vec3.fromValues(0, 1, 0);
     vec3.transformQuat(upVector, upVector, cameraRotation);
 
@@ -425,6 +586,7 @@ async function init() {
     mat4.lookAt(viewMatrix, cameraPos, center, upVector);
     mat4.multiply(viewProjMatrix, projectionMatrix, viewMatrix);
 
+    // 更新 PBR Uniforms
     device.queue.writeBuffer(
       frameUniformBuffer,
       0,
@@ -432,12 +594,28 @@ async function init() {
     );
     device.queue.writeBuffer(frameUniformBuffer, 64, cameraPos as Float32Array);
 
+    // 更新 Skybox Uniforms (移除 View 的位移)
+    const viewNoTranslate = mat4.clone(viewMatrix);
+    viewNoTranslate[12] = 0;
+    viewNoTranslate[13] = 0;
+    viewNoTranslate[14] = 0;
+    const skyboxViewProj = mat4.multiply(
+      mat4.create(),
+      projectionMatrix,
+      viewNoTranslate
+    );
+    device.queue.writeBuffer(
+      skyboxUniformBuffer,
+      0,
+      skyboxViewProj as Float32Array
+    );
+
     const commandEncoder = device.createCommandEncoder();
     const renderPass = commandEncoder.beginRenderPass({
       colorAttachments: [
         {
           view: context.getCurrentTexture().createView(),
-          clearValue: { r: 0.1, g: 0.15, b: 0.2, a: 1.0 },
+          clearValue: { r: 0.1, g: 0.1, b: 0.1, a: 1.0 },
           loadOp: "clear",
           storeOp: "store",
         },
@@ -450,9 +628,16 @@ async function init() {
       },
     });
 
+    // 2. 绘制 Skybox (通常先画，或者最后画且 depth func 为 less-equal)
+    renderPass.setPipeline(skyboxPipeline);
+    renderPass.setBindGroup(0, skyboxBindGroup);
+    renderPass.setVertexBuffer(0, skyboxBuffer);
+    renderPass.draw(36);
+
+    // 3. 绘制 PBR 模型
     if (drawCommands.length > 0) {
       renderPass.setPipeline(drawCommands[0].pipeline);
-      renderPass.setBindGroup(0, frameBindGroup);
+      renderPass.setBindGroup(0, frameBindGroup); // 包含 EnvMap
       for (const cmd of drawCommands) {
         renderPass.setBindGroup(1, cmd.nodeBindGroup);
         renderPass.setBindGroup(2, cmd.materialBindGroup);

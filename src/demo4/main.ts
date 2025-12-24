@@ -23,7 +23,7 @@ async function init() {
   // 1. 【新增】加载图片并创建 Texture 和 Sampler
   let texture: GPUTexture;
   try {
-    const response = await fetch("test1.jpg"); // 从 public 文件夹加载
+    const response = await fetch("brick.jpg"); // 从 public 文件夹加载
     const imageBitmap = await createImageBitmap(await response.blob());
 
     texture = device.createTexture({
